@@ -2,31 +2,32 @@ use clap::Parser;
 use glob::glob;
 use image::GenericImageView;
 use rayon::prelude::*;
+use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Debug, Parser)]
+#[command(version, about = "A simple image cropping tool")]
 struct CliOptions {
-    /// Input image or directory path.
-    #[clap(long, short, about)]
+    /// Input image file or directory path.
+    #[arg(long, short)]
     input_path: PathBuf,
 
-    /// Output image or directory path.
-    #[clap(long, short, about)]
+    /// Output directory path.
+    #[arg(long, short)]
     output_path: Option<PathBuf>,
 
     /// Number of threads to use.
-    #[clap(long, short, default_value_t = num_cpus::get())]
+    #[arg(long, short, default_value_t = num_cpus::get())]
     num_threads: usize,
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     let cli_options = CliOptions::parse();
 
     rayon::ThreadPoolBuilder::new()
         .num_threads(cli_options.num_threads)
-        .build_global()
-        .unwrap();
+        .build_global()?;
 
     let output_path = cli_options.output_path.unwrap_or_else(|| {
         let mut default_output = cli_options.input_path.clone();
@@ -36,36 +37,38 @@ fn main() {
     });
 
     if cli_options.input_path.is_dir() {
-        process_directory(&cli_options.input_path, &output_path);
+        process_directory(&cli_options.input_path, &output_path)?;
     } else {
-        process_file(&cli_options.input_path, &output_path);
+        process_file(&cli_options.input_path, &output_path)?;
     }
+
+    Ok(())
 }
 
-fn process_directory(input_dir: &Path, output_dir: &Path) {
+fn process_directory(input_dir: &Path, output_dir: &Path) -> Result<(), Box<dyn Error>> {
     let pattern = input_dir.join("*.png"); // Adjust pattern for different image formats if necessary
     let output_dir = Arc::new(output_dir.to_path_buf());
-    glob(pattern.to_str().unwrap())
-        .expect("Failed to read glob pattern")
+    glob(pattern.to_str().unwrap())?
         .filter_map(Result::ok)
         .par_bridge()
         .for_each(|path| {
-            process_file(&path, &output_dir);
+            if let Err(e) = process_file(&path, &output_dir) {
+                eprintln!("Failed to process file {}: {}", path.display(), e);
+            }
         });
+    Ok(())
 }
 
-fn process_file(input_file: &Path, output_dir: &Path) {
-    let img = image::open(input_file).expect("Failed to open image");
+fn process_file(input_file: &Path, output_dir: &Path) -> Result<(), Box<dyn Error>> {
+    let img = image::open(input_file)?;
     let cropped_img = crop_transparent_edges(&img);
     let aspect_corrected_img = crop_to_aspect_ratio(cropped_img);
 
     let file_name = input_file.file_stem().unwrap().to_str().unwrap();
-    let extension = input_file.extension().unwrap().to_str().unwrap();
-    let output_file = output_dir.join(format!("{}_cropped.{}", file_name, extension));
+    let output_file = output_dir.join(format!("{}_cropped.png", file_name));
+    aspect_corrected_img.save(output_file)?;
 
-    aspect_corrected_img
-        .save(output_file)
-        .expect("Failed to save image");
+    Ok(())
 }
 
 fn crop_transparent_edges(img: &image::DynamicImage) -> image::DynamicImage {
@@ -79,7 +82,6 @@ fn crop_transparent_edges(img: &image::DynamicImage) -> image::DynamicImage {
         for x in 0..width {
             let pixel = img.get_pixel(x, y);
             if pixel[3] != 0 {
-                // alpha channel is not transparent
                 top = y;
                 break 'outer;
             }
